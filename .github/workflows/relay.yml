@@ -1,0 +1,69 @@
+name: relay
+on:
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    concurrency:
+      group: relay-leg-${{ matrix.leg }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start relay + tunnel
+        run: |
+          docker build -t relay .
+          docker run -d --name relay -p 8080:8080 -e LEG=${{ matrix.leg }} relay
+          curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
+          URL=""
+          for i in $(seq 1 60); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | head -1)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then cat cf.log; exit 1; fi
+          curl -fsS "$URL/__relay_health"
+          echo "RELAY_URL=$URL" >> "$GITHUB_ENV"
+      - name: Publish state
+        run: |
+          BRANCH="relay-state-${{ matrix.leg }}"
+          D=$(mktemp -d)
+          cd "$D"
+          git init -q
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q origin "$BRANCH"; then
+            git checkout -q -B "$BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$BRANCH"
+          fi
+          mkdir -p state
+          printf '{"leg":%s,"url":"%s","startedAt":"%s","runId":"%s"}\n' \
+            "${{ matrix.leg }}" "$RELAY_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ github.run_id }}" > "state/relay-${{ matrix.leg }}.json"
+          git add state
+          git -c user.name=github-actions[bot] \
+            -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -q -m "relay leg ${{ matrix.leg }} up"
+          git push -q origin "HEAD:refs/heads/$BRANCH"
+      - name: Keepalive
+        run: |
+          END=$((SECONDS+19200))
+          while [ $SECONDS -lt $END ]; do
+            docker inspect -f '{{.State.Running}}' relay | grep -q true || exit 1
+            pgrep -f 'cloudflared tunnel' >/dev/null || exit 1
+            sleep 60
+          done
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f 'cloudflared tunnel' || true
+          docker rm -f relay || true
