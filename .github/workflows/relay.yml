@@ -24,7 +24,7 @@ jobs:
           docker run -d --name relay -p 8080:8080 -e LEG=${{ matrix.leg }} relay
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
+          nohup ./cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
           URL=""
           for i in $(seq 1 60); do
             URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cf.log | head -1)
@@ -32,7 +32,18 @@ jobs:
             sleep 2
           done
           if [ -z "$URL" ]; then cat cf.log; exit 1; fi
-          curl -fsS "$URL/__relay_health"
+          # The tunnel URL is printed before its DNS record is live; probing it
+          # immediately fails with "Could not resolve host". Retry until the
+          # edge answers through the tunnel (up to ~2min).
+          READY=""
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 10 "$URL/__relay_health" > /dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$READY" ]; then echo "Relay health check failed: $URL"; cat cf.log; exit 1; fi
           echo "RELAY_URL=$URL" >> "$GITHUB_ENV"
       - name: Publish state
         run: |
