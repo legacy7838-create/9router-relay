@@ -46,6 +46,8 @@ jobs:
           if [ -z "$READY" ]; then echo "Relay health check failed: $URL"; cat cf.log; exit 1; fi
           echo "RELAY_URL=$URL" >> "$GITHUB_ENV"
       - name: Publish state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           BRANCH="relay-state-${{ matrix.leg }}"
           D=$(mktemp -d)
