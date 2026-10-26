@@ -18,10 +18,12 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-      - name: Build and start relay + tunnel
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - name: Start relay + tunnel
         run: |
-          docker build -t relay .
-          docker run -d --name relay -p 8080:8080 -e LEG=${{ matrix.leg }} relay
+          LEG=${{ matrix.leg }} PORT=8080 nohup bun server.js > relay.log 2>&1 &
           curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
           nohup ./cloudflared tunnel --url http://localhost:8080 --no-autoupdate > cf.log 2>&1 &
@@ -71,12 +73,12 @@ jobs:
         run: |
           END=$((SECONDS+19200))
           while [ $SECONDS -lt $END ]; do
-            docker inspect -f '{{.State.Running}}' relay | grep -q true || exit 1
+            pgrep -f 'bun server.js' >/dev/null || exit 1
             pgrep -f 'cloudflared tunnel' >/dev/null || exit 1
             sleep 60
           done
       - name: Cleanup
         if: always()
         run: |
+          pkill -f 'bun server.js' || true
           pkill -f 'cloudflared tunnel' || true
-          docker rm -f relay || true
